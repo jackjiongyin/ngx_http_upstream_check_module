@@ -32,16 +32,16 @@
 #define SHM_NAME "check_shm"
 #define SHM_SIZE 1 * 1024 * 1024
 
-#define ngx_http_check_peer_lock(peer)        \
-                                              \
-    if (peer->shpool) {                       \
-        ngx_shmtx_lock(&peer->shpool->mutex); \
+#define ngx_http_check_peer_lock()                         \
+                                                           \
+    if (check_main_conf->shpool) {                         \
+        ngx_shmtx_lock(&check_main_conf->shpool->mutex);   \
     }                                         
 
-#define ngx_http_check_peer_unlock(peer)        \
-                                                \
-    if (peer->shpool) {                         \
-        ngx_shmtx_unlock(&peer->shpool->mutex); \
+#define ngx_http_check_peer_unlock()                       \
+                                                           \
+    if (check_main_conf->shpool) {                         \
+        ngx_shmtx_unlock(&check_main_conf->shpool->mutex); \
     }                                         
 
 typedef struct ngx_http_upstream_health_check_peer_s ngx_http_upstream_health_check_peer_t;
@@ -49,23 +49,22 @@ typedef struct ngx_http_upstream_health_check_peer_s ngx_http_upstream_health_ch
 typedef struct {
     ngx_str_t            name;
     ngx_str_t            http_send;
+    ngx_uint_t           alive_http_status;
     ngx_event_handler_pt send_handler;
     ngx_event_handler_pt recv_handler;
 } ngx_peer_check_type;
 
 typedef struct {
 
-    ngx_str_t                             *upstream_name;
+    ngx_str_t           *upstream_name;
 
-    ngx_peer_check_type                 type;
+    ngx_peer_check_type  type;
 
-    ngx_msec_t                          interval;
-    ngx_msec_t                          timeout;
+    ngx_msec_t           interval;
+    ngx_msec_t           timeout;
 
-    ngx_uint_t                          fail_threshold;
-    ngx_uint_t                          rise_threshold;
-
-    ngx_uint_t                          alive_http_status;
+    ngx_uint_t           max_fail;
+    ngx_uint_t           min_rise;
 
 } ngx_http_upstream_health_check_conf_t;
 
@@ -76,6 +75,8 @@ struct ngx_http_upstream_check_peer_shm_s {
 
     ngx_int_t                           wid;
 
+    ngx_pid_t                           pid;
+
     ngx_uint_t                          rise;
     ngx_uint_t                          fail;
 
@@ -85,12 +86,18 @@ struct ngx_http_upstream_check_peer_shm_s {
 
     ngx_http_upstream_rr_peer_t        *rr_peer;
 
+    ngx_http_upstream_check_peer_shm_t *prev;
     ngx_http_upstream_check_peer_shm_t *next;
 };
 
 typedef struct {
-    ngx_uint_t                          peer_sum;
-    ngx_http_upstream_check_peer_shm_t *head;
+    
+    ngx_uint_t                          total_peers;
+
+    ngx_http_upstream_check_peer_shm_t *peers;
+
+    ngx_http_upstream_check_peer_shm_t *dynamic_peers;
+
 } ngx_http_upstream_check_peers_shm_t;
 
 struct ngx_http_upstream_health_check_peer_s {
@@ -118,7 +125,6 @@ struct ngx_http_upstream_health_check_peer_s {
     ngx_buf_t                             *recv_data;
 
     ngx_http_upstream_check_peer_shm_t    *shm;
-    ngx_slab_pool_t                       *shpool;
 
     ngx_log_t                             *log;
 };
@@ -128,21 +134,25 @@ typedef struct {
     ngx_http_upstream_health_check_conf_t *conf;
 
     ngx_array_t peers;
+
 } ngx_http_upstream_health_check_srv_conf_t;
 
 typedef struct {
-    ngx_array_t                          upstreams; /* ngx_http_upstream_health_check_srv_conf_t */
+    ngx_array_t                          peers;     /* ngx_http_upstream_health_check_peer_t */
 
-    ngx_array_t                          confs; /* ngx_http_upstream_health_check_conf_t */
+    ngx_array_t                          confs;     /* ngx_http_upstream_health_check_conf_t */
 
-    ngx_http_upstream_check_peers_shm_t *peers_shm; // next step ? delete ?
+    ngx_http_upstream_check_peers_shm_t *peers_shm;
+
+    ngx_slab_pool_t                     *shpool;
+    ngx_shm_zone_t                      *shm_zone;
 
 } ngx_http_upstream_health_check_main_conf_t;
 
 static ngx_int_t ngx_http_upstream_health_check_init_process(ngx_cycle_t *cycle);
 
 static void *ngx_http_upstream_health_check_create_main_conf(ngx_conf_t *cf);
-static char *ngx_http_upstream_health_check_create_init_main_conf(ngx_conf_t *cf, void *conf);
+static char *ngx_http_upstream_health_check_init_main_conf(ngx_conf_t *cf, void *conf);
 
 static char *ngx_http_upstream_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_check_set_http_send(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
@@ -150,8 +160,9 @@ static char *ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t 
 
 static ngx_peer_check_type *ngx_http_get_peer_check_type(ngx_str_t *str);
 
-static ngx_int_t ngx_http_upstream_health_check_add_srv_conf(ngx_conf_t *cf, 
-                                                             ngx_http_upstream_health_check_srv_conf_t *ucscf);
+static ngx_int_t ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,
+        ngx_http_upstream_health_check_conf_t *conf);
+
 static ngx_int_t ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *uscf);
 
 static ngx_int_t ngx_http_upstream_health_check_init_timers(ngx_cycle_t *cycle);
@@ -190,13 +201,12 @@ static void ngx_http_upstream_health_check_clear(ngx_http_upstream_health_check_
 
 static ngx_http_upstream_health_check_conf_t *ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confs);
 
-static ngx_uint_t id = 0;
-
 static ngx_peer_check_type ngx_peer_check_types[] = {
 
     {
         ngx_string("http"),
         ngx_string("HEAD / HTTP/1.0\r\n\r\n"),
+        NGX_CHECK_HTTP_STATUS_2XX|NGX_CHECK_HTTP_STATUS_3XX,
         ngx_http_upstream_health_check_send_handler,
         ngx_http_upstream_health_check_recv_handler,
     },
@@ -204,6 +214,7 @@ static ngx_peer_check_type ngx_peer_check_types[] = {
     {
         ngx_string("tcp"),
         ngx_null_string,
+        0,
         ngx_http_upstream_health_check_peek_handler,
         ngx_http_upstream_health_check_peek_handler,
     }
@@ -248,7 +259,7 @@ static ngx_http_module_t ngx_http_upstream_health_check_module_ctx = {
     NULL,                                                 /* preconfiguration */
     NULL,                                                 /* postconfiguration */
     ngx_http_upstream_health_check_create_main_conf,      /* create main configuration */
-    ngx_http_upstream_health_check_create_init_main_conf, /* int main configuration */
+    ngx_http_upstream_health_check_init_main_conf,        /* int main configuration */
     NULL,                                                 /* create server configuration */
     NULL,                                                 /* merge server configuration */
     NULL,                                                 /* create location configuration */
@@ -270,37 +281,28 @@ ngx_module_t ngx_http_upstream_health_check_module = {
     NGX_MODULE_V1_PADDING
 };
 
+static ngx_http_upstream_health_check_main_conf_t *check_main_conf = NULL;
+
 static void *
 ngx_http_upstream_health_check_create_main_conf(ngx_conf_t *cf)
 {
     ngx_http_upstream_health_check_main_conf_t *conf;
-    ngx_shm_zone_t                             *shm_zone;
-    ngx_str_t                                  shm_name = ngx_string(SHM_NAME);
 
     conf = ngx_pcalloc(cf->pool,
                        sizeof(ngx_http_upstream_health_check_main_conf_t));
-
     if (conf == NULL) {
         return NULL;
     }
 
     conf->peers_shm = NGX_CONF_UNSET_PTR;
-
-    shm_zone = ngx_shared_memory_add(cf, &shm_name, SHM_SIZE, &ngx_http_upstream_health_check_module);
-    if (shm_zone == NULL) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                "[check] create main conf: create shm_zone fail");
-        return NGX_CONF_ERROR;
-    }
-    shm_zone->init = ngx_http_upstream_health_check_init_shm;
-    shm_zone->data = conf;
-    shm_zone->noreuse = 1;
+    conf->shm_zone = NGX_CONF_UNSET_PTR;
+    conf->shpool = NGX_CONF_UNSET_PTR;
 
 #if (NGX_DEBUG)
-    if (ngx_array_init(&conf->upstreams, cf->pool, 1, 
-                       sizeof(ngx_http_upstream_health_check_srv_conf_t)) != NGX_OK) {
+    if (ngx_array_init(&conf->peers, cf->pool, 1, 
+                       sizeof(ngx_http_upstream_health_check_peer_t)) != NGX_OK) {
         ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                "[check] create main conf: init srv_conf fail");
+                "[check] create main conf: init peers fail");
         return NULL;
     }
     if (ngx_array_init(&conf->confs, cf->pool, 1, 
@@ -310,8 +312,8 @@ ngx_http_upstream_health_check_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 #else
-    if (ngx_array_init(&conf->upstreams, cf->pool, 1024,
-                       sizeof(ngx_http_upstream_health_check_srv_conf_t)) != NGX_OK) {
+    if (ngx_array_init(&conf->peers, cf->pool, 1024,
+                       sizeof(ngx_http_upstream_health_check_peer_t)) != NGX_OK) {
         ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
                 "[check] create main conf: init srv_conf fail");
         return NULL;
@@ -327,32 +329,71 @@ ngx_http_upstream_health_check_create_main_conf(ngx_conf_t *cf)
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
                 "[check] create main conf: success");
 
+    check_main_conf = conf;
+
     return conf;
 }
 
 static char *
-ngx_http_upstream_health_check_create_init_main_conf(ngx_conf_t *cf, void *conf)
+ngx_http_upstream_health_check_init_main_conf(ngx_conf_t *cf, void *conf)
 {
+    ngx_http_upstream_health_check_main_conf_t *ucmcf;
     ngx_http_upstream_main_conf_t              *umcf;
     ngx_http_upstream_srv_conf_t               **uscfp;
-    ngx_uint_t                                 i;
+    ngx_uint_t                                  i;
+    ngx_shm_zone_t                             *shm_zone;
+    ngx_str_t                                   shm_name = ngx_string(SHM_NAME);
+    size_t                                      shm_size = SHM_SIZE;
 
     umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
     if (umcf == NULL) {
         ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                "[check] init main conf: main_conf is null");
+                "[check] init main conf: upstream main_conf is null");
         return NGX_CONF_ERROR;
     }
-    uscfp = umcf->upstreams.elts;
-    id = 0;
 
+    ucmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_health_check_module);
+    if (ucmcf == NULL) {
+        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
+                "[check] init main conf: check main_conf is null");
+        return NGX_CONF_ERROR;
+    }
+
+    if (ucmcf->confs.nelts == 0) {
+        return NGX_CONF_OK;
+    }
+
+    uscfp = umcf->upstreams.elts;
     for(i = 0; i < umcf->upstreams.nelts; i++) {
         if (ngx_http_upstream_health_check_init_peers(cf, uscfp[i]) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
     }
 
-    ngx_log_debug0(NGX_LOG_ERR, cf->log, 0,
+    /*
+    if (ucmcf->peers.nelts == 0) {
+        ngx_conf_log_error(NGX_LOG_NOTICE, cf->log, 0, 
+                "[check] init main conf: no peer to check, free main conf");
+        ngx_array_destroy(&ucmcf->peers);
+        ngx_array_destroy(&ucmcf->confs);
+
+        return NGX_CONF_OK
+    }
+    */
+
+    shm_zone = ngx_shared_memory_add(cf, &shm_name, shm_size, &ngx_http_upstream_health_check_module);
+    if (shm_zone == NULL) {
+        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
+                "[check] create main conf: create shm_zone fail");
+        return NGX_CONF_ERROR;
+    }
+    shm_zone->init = ngx_http_upstream_health_check_init_shm;
+    shm_zone->data = conf;
+    shm_zone->noreuse = 1;
+
+    ucmcf->shm_zone = shm_zone;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
             "[check] init main conf: init success");
 
     return NGX_CONF_OK;
@@ -363,40 +404,41 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
 {    
 
     ngx_http_upstream_health_check_main_conf_t *ucmcf;
-    ngx_http_upstream_health_check_srv_conf_t  *ucscfp, *ucscf;
     ngx_http_upstream_health_check_peer_t      *peer;
+    ngx_http_upstream_health_check_conf_t      *confs, *conf;
     ngx_http_upstream_server_t                 *server;
     ngx_uint_t                                  i, j;
+    ngx_array_t                                *confp, *peers;
+    
     
     ucmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_health_check_module);
 
-    if (ucmcf == NULL) {
-        return NGX_ERROR;
-    }
-
-    ucscfp = ucmcf->upstreams.elts;
-    ucscf = NULL;
-
-    for (i = 0; i < ucmcf->upstreams.nelts; i++) {
-        if ((ucscfp[i].conf)->upstream_name == &uscf->host) {
-            ucscf = &ucscfp[i];
+    confp = &ucmcf->confs;
+    confs = confp->elts;
+    conf = NULL;
+    for (i = 0; i < confp->nelts; i++) {
+        conf = &confs[i];
+        if (ngx_strncmp(conf->upstream_name->data, 
+                    uscf->host.data, uscf->host.len) == 0) {
             break;
         }
+        conf = NULL;
     }
 
-    if (ucscf != NULL && uscf->servers) {
+    if (conf != NULL && uscf->servers) {
 
         server = uscf->servers->elts;
+        peers = &ucmcf->peers;
 
         for (i = 0; i < uscf->servers->nelts; i++) {
 
             if (server[i].backup) {
-                //todo add backup server
+                /* TODO */
                 continue;
             }
 
             for (j = 0; j < server[i].naddrs; j++) {
-                peer = ngx_array_push(&ucscf->peers);
+                peer = ngx_array_push(peers);
 
                 if (peer == NULL) {
                     ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
@@ -404,7 +446,6 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                     return NGX_ERROR;
                 }
 
-                peer->index = id;
                 peer->state = 0;
                 peer->check_state = NGX_CHECK;
 
@@ -412,8 +453,7 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                 peer->sockaddr = server[i].addrs[j].sockaddr;
                 peer->socklen = server[i].addrs[j].socklen;
 
-                peer->conf = ucscf->conf;
-
+                peer->conf = conf;
                 ngx_memzero(&peer->status, sizeof(ngx_http_status_t));
 
                 peer->pool = ngx_create_pool(ngx_pagesize, cf->log);
@@ -423,11 +463,10 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                     return NGX_ERROR;
                 }
 
-                ngx_log_debug3(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                        "[check] init peer: peer succ upstream_name=%V, name=%V, id=%i", 
-                        peer->conf->upstream_name, &peer->name, id);
+                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, cf->log, 0,
+                        "[check] init peer: peer succ upstream_name=%V, name=%V", 
+                        peer->conf->upstream_name, &peer->name);
 
-                id++;
             }
 
         }
@@ -436,11 +475,12 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                         "[check] init peer: srv succ upstream_name=%V", &uscf->host);
         return NGX_OK;
 
-    } else {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                        "[check] init peer: srv fail upstream_name=%V", &uscf->host);
-        return NGX_ERROR;
-    }
+    } 
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
+                        "[check] init peer: no srv upstream_name=%V", &uscf->host);
+ 
+    return NGX_OK;
 }
 
 static ngx_int_t
@@ -448,104 +488,99 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
 {
     size_t                                      len;
     u_char                                     *file;
-    ngx_array_t                                *ucscfp, *peersp;
+    ngx_array_t                                *peersp;
     ngx_http_upstream_health_check_peer_t      *peers, *peer;
     ngx_http_upstream_health_check_main_conf_t *ucmcf;
-    ngx_http_upstream_health_check_srv_conf_t  *ucscf;
     ngx_http_upstream_check_peer_shm_t         *peer_shm, *prev_shm;
     ngx_http_upstream_check_peers_shm_t        *peers_shm;
     ngx_slab_pool_t                            *shpool;
-    ngx_uint_t                                  i, j, same;
+    ngx_uint_t                                  i;
 
     shpool = (ngx_slab_pool_t *)shm_zone->shm.addr;
 
     ucmcf = shm_zone->data;
-    ucscfp = &ucmcf->upstreams;
-    ucscf = ucscfp->elts;
-
-    if (!ucscfp->nelts) {
-        return NGX_OK;
-    }
+    peersp = &ucmcf->peers;
 
     peers_shm = ngx_slab_alloc(shpool, sizeof(ngx_http_upstream_check_peers_shm_t));
     if (peers_shm == NULL) {
         return NGX_ERROR;
     }
 
-    peers_shm->head = ngx_slab_alloc(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
-    if (peers_shm->head == NULL) {
+    peers_shm->peers = ngx_slab_alloc(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
+    if (peers_shm->peers == NULL) {
         return NGX_ERROR;
     }
-    peers_shm->head->next = NULL;
-    peers_shm->peer_sum = 0;
-    prev_shm = peers_shm->head;
+    peers_shm->peers->next = NULL;
+    peers_shm->peers->prev = NULL;
 
-    for (i = 0; i < ucscfp->nelts; i++) {
+    peers_shm->dynamic_peers = ngx_slab_alloc(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
+    if (peers_shm->dynamic_peers == NULL) {
+        return NGX_ERROR;
+    }
+    peers_shm->dynamic_peers->next = NULL;
+    peers_shm->dynamic_peers->prev = NULL;
 
-        peersp = &ucscf[i].peers;
-        if (peersp->nelts == 0) {
-            continue;
+    peers_shm->total_peers = 0;
+    prev_shm = peers_shm->peers;
+
+    if (peersp->nelts == 0) {
+        return NGX_OK;
+    }
+    peers = peersp->elts;
+
+    for (i = 0; i < peersp->nelts; i++) {
+
+        peer = &peers[i];
+
+        peer_shm = ngx_slab_alloc(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
+        if (peer_shm == NULL) {
+            return NGX_ERROR;
         }
-        peers = peersp->elts;
 
-        for (j = 0; j < peersp->nelts; j++) {
-            peer = &peers[j];
-            peer_shm = peers_shm->head->next;
-            // check exists peer
-            same = 0;
-            while(peer_shm) {
-                if (ngx_strncmp(peer->name.data, peer_shm->name->data, peer_shm->name->len) == 0) {
-                    same = 1;
-                    break;
-                }
-                peer_shm = peer_shm->next;
-            }
-            if (!same) {
-                peer_shm = ngx_slab_alloc(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
-                if (peer_shm == NULL) {
-                    return NGX_ERROR;
-                }
+        peer_shm->wid = -1;
+        peer_shm->rr_peer = NULL;
 
-                peer_shm->index = peer->index;
-                peer_shm->wid = -1;
-                peer_shm->rr_peer = NULL;
-
-                peer_shm->socklen = peer->socklen;
-                peer_shm->sockaddr = ngx_slab_alloc(shpool, peer_shm->socklen);
-                if (peer_shm->sockaddr == NULL) {
-                    return NGX_ERROR;
-                }
-                ngx_memcpy(peer_shm->sockaddr, peer->sockaddr,
-                        peer_shm->socklen);
-
-                peer_shm->name = ngx_slab_alloc(shpool, sizeof(ngx_str_t));
-                if (peer_shm->name == NULL) {
-                    return NGX_ERROR;
-                }
-                peer_shm->name->len = peer->name.len;
-                peer_shm->name->data = ngx_slab_alloc(shpool, peer_shm->name->len);
-                if (peer_shm->name->data == NULL) {
-                    return NGX_ERROR;
-                }
-                ngx_memcpy(peer_shm->name->data, peer->name.data, peer_shm->name->len);
-
-                peer_shm->fail = 0;
-                peer_shm->rise = 0;
-
-                peer_shm->next = NULL;
-                prev_shm->next = peer_shm;
-                prev_shm = peer_shm;
-
-                peers_shm->peer_sum += 1;
-            }
-            peer->shm = peer_shm;
-            peer->shpool = shpool;
+        peer_shm->socklen = peer->socklen;
+        peer_shm->sockaddr = ngx_slab_alloc(shpool, peer_shm->socklen);
+        if (peer_shm->sockaddr == NULL) {
+            return NGX_ERROR;
         }
+        ngx_memcpy(peer_shm->sockaddr, peer->sockaddr, peer_shm->socklen);
+
+        peer_shm->name = ngx_slab_alloc(shpool, sizeof(ngx_str_t));
+        if (peer_shm->name == NULL) {
+            return NGX_ERROR;
+        }
+        peer_shm->name->len = peer->name.len;
+        peer_shm->name->data = ngx_slab_alloc(shpool, peer_shm->name->len);
+        if (peer_shm->name->data == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memcpy(peer_shm->name->data, peer->name.data, peer_shm->name->len);
+
+        peer_shm->fail = 0;
+        peer_shm->rise = 0;
+
+        peer_shm->next = NULL;
+        peer_shm->prev = prev_shm;
+
+        prev_shm->next = peer_shm;
+
+        prev_shm = peer_shm;
+
+        peers_shm->total_peers += 1;
+
+        peer_shm->index = peers_shm->total_peers;
+
+        peer->shm = peer_shm;
     }
     
     ucmcf->peers_shm = peers_shm;
     shpool->data = peers_shm;
     shm_zone->data = peers_shm;
+
+    ucmcf->shpool = shpool;
+    ucmcf->shm_zone = shm_zone;
 
     len = sizeof("[check] in peer shm \"\"") + shm_zone->shm.name.len;
     shpool->log_ctx = ngx_slab_alloc(shpool, len);
@@ -575,11 +610,10 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
 static char *
 ngx_http_upstream_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_upstream_health_check_srv_conf_t  *ucscf;
     ngx_http_upstream_health_check_main_conf_t *ucmcf;
     ngx_http_upstream_health_check_conf_t      *check_conf;
-    ngx_int_t                                   rv;
-    ngx_array_t                                *confs, *upstreams; 
+    ngx_int_t                                   rc;
+    ngx_array_t                                *confsp; 
 
     ucmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_health_check_module);
     if (ucmcf == NULL) {
@@ -588,25 +622,16 @@ ngx_http_upstream_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    confs = &ucmcf->confs;
-    upstreams = &ucmcf->upstreams;
+    confsp = &ucmcf->confs;
 
-    ucscf = ngx_array_push(upstreams);
-    if (ucscf == NULL) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                "[check] health check conf: alloc srv conf fail");
-        return NGX_CONF_ERROR;
-    }
-
-    check_conf = ngx_http_check_get_conf(cf, confs);
+    check_conf = ngx_http_check_get_conf(cf, confsp);
     if (check_conf == NULL) {
         return NGX_CONF_ERROR;
     }
-    ucscf->conf = check_conf;
 
-    rv = ngx_http_upstream_health_check_add_srv_conf(cf, ucscf);
+    rc = ngx_http_upstream_health_check_init_conf(cf, check_conf);
 
-    if (rv == NGX_ERROR) {
+    if (rc == NGX_ERROR) {
         return NGX_CONF_ERROR;
     }
     
@@ -617,31 +642,33 @@ ngx_http_upstream_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 static ngx_http_upstream_health_check_conf_t *
-ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confs)
+ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confsp)
 {
     ngx_uint_t                             i;
     ngx_str_t                             *upstream_name;
-    ngx_http_upstream_health_check_conf_t *confp, *conf;
+    ngx_http_upstream_health_check_conf_t *confs, *conf;
     ngx_http_upstream_srv_conf_t          *uscf;
 
-    confp = confs->elts;
+    confs = confsp->elts;
     conf = NULL;
 
     uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
     upstream_name = &uscf->host;
 
-    for (i = 0; i < confs->nelts; i++) {
-        conf = &confp[i];
-        if (upstream_name == conf->upstream_name) {
+    for (i = 0; i < confsp->nelts; i++) {
+        conf = &confs[i];
+        if (ngx_strncmp(conf->upstream_name->data
+                    , upstream_name->data, upstream_name->len) == 0) {
             break;
         }
+        conf = NULL;
     }
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
             "[check] get conf: upstream=%V", upstream_name);
 
     if (conf == NULL) {
-        conf = ngx_array_push(confs);
+        conf = ngx_array_push(confsp);
         if (conf == NULL) {
             ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
                     "[check] get conf: alloc conf fail");
@@ -650,9 +677,9 @@ ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confs)
         conf->upstream_name = upstream_name;
         conf->interval = NGX_CONF_UNSET_MSEC;
         conf->timeout = NGX_CONF_UNSET_MSEC;
-        conf->fail_threshold = NGX_CONF_UNSET_UINT;
-        conf->rise_threshold = NGX_CONF_UNSET_UINT;
-        conf->alive_http_status = NGX_CONF_UNSET_UINT;
+        conf->max_fail = NGX_CONF_UNSET_UINT;
+        conf->min_rise = NGX_CONF_UNSET_UINT;
+
         ngx_memzero(&conf->type, sizeof(ngx_peer_check_type));
 
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
@@ -666,7 +693,7 @@ static char *
 ngx_http_check_set_http_send(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_upstream_health_check_main_conf_t *ucmcf;
-    ngx_array_t                                *confs;
+    ngx_array_t                                *confsp;
     ngx_http_upstream_health_check_conf_t      *check_conf;
     ngx_str_t                                  *value;
 
@@ -677,9 +704,9 @@ ngx_http_check_set_http_send(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
  
         return NGX_CONF_ERROR;
     }
-    confs = &ucmcf->confs;
+    confsp = &ucmcf->confs;
 
-    check_conf = ngx_http_check_get_conf(cf, confs);
+    check_conf = ngx_http_check_get_conf(cf, confsp);
 
     if (check_conf == NULL) {
         return NGX_CONF_ERROR;
@@ -705,7 +732,7 @@ static char *
 ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_upstream_health_check_main_conf_t *ucmcf;
-    ngx_array_t                                *confs;
+    ngx_array_t                                *confsp;
     ngx_http_upstream_health_check_conf_t      *check_conf;
     ngx_str_t                                  *value;
     ngx_uint_t                                  i, j, status;
@@ -721,8 +748,8 @@ ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t *cmd, void *c
         return NGX_CONF_ERROR;
     }
  
-    confs = &ucmcf->confs;
-    check_conf = ngx_http_check_get_conf(cf, confs);
+    confsp = &ucmcf->confs;
+    check_conf = ngx_http_check_get_conf(cf, confsp);
     if (check_conf == NULL) {
         return NGX_CONF_ERROR;
     }
@@ -756,7 +783,7 @@ ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t *cmd, void *c
         return NGX_CONF_ERROR;
     }
 
-    check_conf->alive_http_status = status;
+    check_conf->type.alive_http_status = status;
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0, "[check] set alive_http_status conf: succ");
 
@@ -764,20 +791,18 @@ ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t *cmd, void *c
 }
 
 static ngx_int_t
-ngx_http_upstream_health_check_add_srv_conf(ngx_conf_t *cf, ngx_http_upstream_health_check_srv_conf_t *ucscf) 
+ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_health_check_conf_t *conf) 
 {
     ngx_str_t                             *value, str;
     ngx_uint_t                             i;
     ngx_msec_t                             interval, timeout;
     ngx_uint_t                             rise, fail;
-    ngx_http_upstream_health_check_conf_t *conf;
     ngx_peer_check_type                   *type;
 
-    if (ucscf == NULL) {
+    if (conf == NULL) {
         return NGX_ERROR;
     }
 
-    conf = ucscf->conf;
     value = cf->args->elts;
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
@@ -790,7 +815,17 @@ ngx_http_upstream_health_check_add_srv_conf(ngx_conf_t *cf, ngx_http_upstream_he
             str.data = value[i].data + 5;
 
             if ((type = ngx_http_get_peer_check_type(&str)) != NULL) { 
-                ngx_memcpy(&conf->type, type, sizeof(ngx_peer_check_type));
+                ngx_str_set(&conf->type.name, type->name.data);
+                if (conf->type.http_send.len == 0) {
+                    ngx_str_set(&conf->type.http_send, type->http_send.data);
+                }
+                if (conf->type.alive_http_status == 0) {
+                    conf->type.alive_http_status = type->alive_http_status;
+                }
+
+                conf->type.send_handler = type->send_handler;
+                conf->type.recv_handler = type->recv_handler;
+                //ngx_memcpy(&conf->type, type, sizeof(ngx_peer_check_type));
             }
 
             continue;
@@ -828,7 +863,7 @@ ngx_http_upstream_health_check_add_srv_conf(ngx_conf_t *cf, ngx_http_upstream_he
 
             rise = ngx_atoi(str.data, str.len);
             if (rise != (ngx_uint_t)NGX_ERROR && rise != 0) {
-                conf->rise_threshold = rise;
+                conf->min_rise = rise;
             }
 
             continue;
@@ -840,13 +875,13 @@ ngx_http_upstream_health_check_add_srv_conf(ngx_conf_t *cf, ngx_http_upstream_he
 
             fail = ngx_atoi(str.data, str.len);
             if (fail != (ngx_uint_t)NGX_ERROR && fail != 0) {
-                conf->fail_threshold = fail;
+                conf->max_fail = fail;
             }
             continue;
         }
     }
 
-    if (&conf->type == NULL) {
+    if (conf->type.name.len == 0) {
         ngx_memcpy(&conf->type, ngx_peer_check_types, sizeof(ngx_peer_check_type));
     }
 
@@ -854,41 +889,21 @@ ngx_http_upstream_health_check_add_srv_conf(ngx_conf_t *cf, ngx_http_upstream_he
                         ? conf->interval : 5000;
     conf->timeout = (conf->timeout != NGX_CONF_UNSET_MSEC) 
                         ? conf->timeout : 1000;
-    conf->rise_threshold = (conf->rise_threshold != NGX_CONF_UNSET_UINT) 
-                        ? conf->rise_threshold : 1;
-    conf->fail_threshold = (conf->fail_threshold != NGX_CONF_UNSET_UINT) 
-                        ? conf->fail_threshold : 2;
-    conf->alive_http_status = (conf->alive_http_status != NGX_CONF_UNSET_UINT) 
-                        ? conf->alive_http_status : (NGX_CHECK_HTTP_STATUS_2XX|NGX_CHECK_HTTP_STATUS_3XX);
-
+    conf->min_rise = (conf->min_rise != NGX_CONF_UNSET_UINT) 
+                        ? conf->min_rise : 1;
+    conf->max_fail = (conf->max_fail != NGX_CONF_UNSET_UINT) 
+                        ? conf->max_fail : 2;
+    
     ngx_log_debug6(NGX_LOG_DEBUG_HTTP, cf->log, 0,
             "[check] add srv conf: type=%V, interval=%M, timeout=%M, rise=%i, fail=%i, status=%i",
             &conf->type.name, conf->interval, conf->timeout, 
-            conf->rise_threshold, conf->fail_threshold, conf->alive_http_status);
+            conf->min_rise, conf->max_fail, conf->type.alive_http_status);
 
-#if (NGX_DEBUG)
-
-    if (ngx_array_init(&ucscf->peers, cf->pool, 1, 
-                        sizeof(ngx_http_upstream_health_check_peer_t)) != NGX_OK) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                "[check] add srv conf: init peer arr fail");
-        return NGX_ERROR;
-    }
-    
-#else
-
-    if (ngx_array_init(&ucscf->peers, cf->pool, 1024, 
-                        sizeof(ngx_http_upstream_health_check_peer_t)) != NGX_OK) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                "[check] add srv conf: init peer arr fail");
-        return NGX_ERROR;
-    }
-
-#endif
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
             "[check] add srv conf: add srv conf succ");
  
     return NGX_OK;
+
 }
 
 static ngx_int_t
@@ -912,56 +927,60 @@ static ngx_int_t
 ngx_http_upstream_health_check_init_timers(ngx_cycle_t *cycle)
 {
     ngx_http_upstream_health_check_main_conf_t *ucmcf;
-    ngx_http_upstream_health_check_srv_conf_t  *ucscf;
-    ngx_http_upstream_health_check_peer_t      *peers;
+    ngx_http_upstream_health_check_peer_t      *peers, *peer;
     ngx_http_upstream_main_conf_t              *umcf;
     ngx_core_conf_t                            *ccf;
-    ngx_uint_t                                  i, j;
+    ngx_uint_t                                  i;
     ngx_int_t                                   worker_processes;
+    ngx_array_t                                *peersp;
     
     ucmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_health_check_module);
     umcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_module);
     ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
 
     worker_processes = ccf->worker_processes;
-    ucscf = ucmcf->upstreams.elts;
+    peersp = &ucmcf->peers;
+
+    if (peersp->nelts == 0) {
+        return NGX_OK;
+    }
 
     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, cycle->log, 0,
-            "[check] init timers: wokers=%i, srvs=%i, pid=%P", 
-            worker_processes, ucmcf->upstreams.nelts, ngx_pid);
+            "[check] init timers: wokers=%i, peers=%i, pid=%P", 
+            worker_processes, peersp->nelts, ngx_pid);
 
-    for (i = 0; i < ucmcf->upstreams.nelts; i++) {
-        peers = (ucscf[i].peers).elts;
+    peers = peersp->elts;
+    for (i = 0; i < peersp->nelts; i++) {
 
-        for (j = 0; j < (ucscf[i].peers).nelts; j++) {
+        peer = &peers[i];
 
-            ngx_http_check_peer_lock((&peers[j]));
+        ngx_http_check_peer_lock();
             
-            if (peers[j].shm->wid == -1) {
-                peers[j].shm->wid = peers[j].index % worker_processes;
-            }
-            if (peers[j].shm->rr_peer == NULL) {
-                peers[j].shm->rr_peer = get_health_check_rr_peer(&peers[j], umcf);
-            }
-
-            if (peers[j].shm->rr_peer == NULL) {
-                continue;
-            }
-
-            ngx_log_debug6(NGX_LOG_DEBUG_HTTP, cycle->log, 0, 
-                    "[check] init timers: peer=%V, rr_peer=%V, pid=%P, slot=%i, wid=%i, wp=%i", 
-                    &peers[j].name, &peers[j].shm->rr_peer->name, ngx_pid, 
-                    ngx_process_slot, peers[j].shm->wid, worker_processes);
-
-            if (peers[j].shm->wid != (ngx_process_slot % worker_processes)) {
-                ngx_http_check_peer_unlock((&peers[j]));
-                continue;
-            }
-
-            ngx_http_check_peer_unlock((&peers[j]));
-
-            ngx_http_upstream_health_check_add_timers(&peers[j], ucscf[i].conf->interval, cycle->log);
+        if (peer->shm->wid == -1) {
+            peer->shm->wid = peer->shm->index % worker_processes;
         }
+        if (peer->shm->rr_peer == NULL) {
+            peer->shm->rr_peer = get_health_check_rr_peer(peer, umcf);
+        }
+
+        if (peer->shm->rr_peer == NULL) {
+            ngx_http_check_peer_unlock();
+            continue;
+        }
+
+        ngx_log_debug6(NGX_LOG_DEBUG_HTTP, cycle->log, 0, 
+                "[check] init timers: peer=%V, rr_peer=%V, pid=%P, slot=%i, wid=%i, wp=%i", 
+                &peer->name, &peer->shm->rr_peer->name, ngx_pid, 
+                ngx_process_slot, peer->shm->wid, worker_processes);
+
+        if (peer->shm->wid != (ngx_process_slot % worker_processes)) {
+            ngx_http_check_peer_unlock();
+            continue;
+        }
+
+        ngx_http_check_peer_unlock();
+
+        ngx_http_upstream_health_check_add_timers(peer, peer->conf->interval, cycle->log);
     }
 
     return NGX_OK;
@@ -1020,7 +1039,7 @@ static void
 ngx_http_upstream_health_check_init_event_handler(ngx_event_t *ev)
 {
     if (ngx_http_upstream_health_check_need_exit(ev)) {
-        return ;
+        return;
     }
 
     ngx_http_upstream_health_check_connect_handler(ev);
@@ -1340,7 +1359,7 @@ ngx_http_upstream_health_check_recv_handler(ngx_event_t *ev)
         }
 
         if (status) {
-            if (status & peer->conf->alive_http_status) {
+            if (status & peer->conf->type.alive_http_status) {
                 ngx_http_upstream_health_check_update_status(peer, 1);
             } else {
                 ngx_http_upstream_health_check_update_status(peer, 0);
@@ -1376,7 +1395,7 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
 
     conf = peer->conf;
 
-    ngx_http_check_peer_lock(peer);
+    ngx_http_check_peer_lock();
 
     if (rc == 1) {
          peer->shm->rise += 1;
@@ -1390,7 +1409,7 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
       
     rr_peer = peer->shm->rr_peer;
 
-    if (peer->shm->rise == conf->rise_threshold) {
+    if (peer->shm->rise == conf->min_rise) {
 
         peer->shm->fail = 0;
 
@@ -1400,7 +1419,7 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
                     "[check] update status: peer up name=%V, pid=%P", &peer->name, ngx_pid);
         }
 
-    }  else if (peer->shm->fail == conf->fail_threshold) {
+    }  else if (peer->shm->fail == conf->max_fail) {
         
         peer->shm->rise = 0;
 
@@ -1412,7 +1431,7 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
 
     }
 
-    ngx_http_check_peer_unlock(peer);
+    ngx_http_check_peer_unlock();
 }
 
 static ngx_int_t ngx_http_upstream_health_check_process_response(ngx_connection_t *c)
@@ -1736,6 +1755,79 @@ ngx_http_upstream_health_check_clear(ngx_http_upstream_health_check_peer_t *peer
 
     ngx_memzero(peer, sizeof(ngx_http_upstream_health_check_peer_t));
 }
+
+/*
+static ngx_int_t
+ngx_http_upstream_add_dynamic_peer(ngx_http_upstream_rr_peer_t *rr_peer, ngx_http_upstream_health_check_conf_t *conf) {
+    ngx_slab_pool_t                       *shpool;
+    ngx_http_upstream_check_peer_shm_t    *peer_head;
+    ngx_array_t                           *confsp;
+    ngx_http_upstream_health_check_conf_t *confs, *conf;
+    ngx_http_upstream_health_check_peer_t *peer;
+
+    if (check_main_conf == NULL) {
+        return NGX_ERROR;
+    }
+
+    //init peer_t
+
+    shpool = check_main_conf->shpool;
+
+    //alloc peer_shm
+    ngx_http_check_peer_lock();
+
+    peer_head = check_main_conf->peers_shm->dynamic_peers;
+
+    peer_shm = ngx_slab_alloc_locked(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
+    if (peer_shm == NULL) {
+        goto add_fail;
+    }
+
+    peer_shm->index = peers_shm->total_peers + 1;
+    peer_shm->wid = -1;
+    peer_shm->rr_peer = rr_peer;
+
+    peer_shm->socklen = rr_peer->socklen;
+    peer_shm->sockaddr = ngx_slab_alloc_locked(shpool, peer_shm->socklen);
+    if (peer_shm->sockaddr == NULL) {
+        goto add_fail;
+    }
+    ngx_memcpy(peer_shm->sockaddr, rr_peer->sockaddr, rr_peer->socklen);
+
+    peer_shm->name = ngx_slab_alloc_locked(shpool, sizeof(ngx_str_t));
+    if (peer_shm->name == NULL) {
+        goto add_fail;
+    }
+    peer_shm->name->len = rr_peer->name.len;
+    peer_shm->name->data = ngx_slab_alloc_locked(shpool, peer_shm->name->len);
+    if (peer_shm->name->data == NULL) {
+        goto add_fail;
+    }
+    ngx_memcpy(peer_shm->name->data, rr_peer->name.data, rr_peer->name.len);
+
+    peer_shm->fail = 0;
+    peer_shm->rise = 0;
+
+    peer_shm->next = peer_head->next;
+    peer_shm->prev = peer_head;
+
+    peer_head->next = peer_shm;
+
+    peers_shm->total_peers += 1;
+
+    ngx_http_check_peer_unlock();
+
+    return NGX_OK;
+   
+add_fail:
+    ngx_http_check_peer_unlock();
+    return NGX_ERROR;
+}
+
+static void *
+ngx_http_upstream_remove_dynamic_peer(ngx_http_upstream_rr_peer_t *rr_peer) {
+}
+*/
 
 static ngx_peer_check_type *
 ngx_http_get_peer_check_type(ngx_str_t *str)
