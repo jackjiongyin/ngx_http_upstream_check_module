@@ -197,7 +197,7 @@ static ngx_int_t ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zon
 
 static ngx_int_t ngx_http_upstream_health_check_init_send_data_buf(ngx_http_upstream_health_check_peer_t *peer);
 static ngx_int_t ngx_http_upstream_health_check_init_recv_data_buf(ngx_http_upstream_health_check_peer_t *peer);
-static void ngx_http_upstream_health_check_clear(ngx_http_upstream_health_check_peer_t *peer);
+static void ngx_http_upstream_health_check_clear();
 
 static ngx_http_upstream_health_check_conf_t *ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confs);
 
@@ -282,6 +282,7 @@ ngx_module_t ngx_http_upstream_health_check_module = {
 };
 
 static ngx_http_upstream_health_check_main_conf_t *check_main_conf = NULL;
+static ngx_int_t                                   worker_processes = 0;
 
 static void *
 ngx_http_upstream_health_check_create_main_conf(ngx_conf_t *cf)
@@ -369,17 +370,6 @@ ngx_http_upstream_health_check_init_main_conf(ngx_conf_t *cf, void *conf)
             return NGX_CONF_ERROR;
         }
     }
-
-    /*
-    if (ucmcf->peers.nelts == 0) {
-        ngx_conf_log_error(NGX_LOG_NOTICE, cf->log, 0, 
-                "[check] init main conf: no peer to check, free main conf");
-        ngx_array_destroy(&ucmcf->peers);
-        ngx_array_destroy(&ucmcf->confs);
-
-        return NGX_CONF_OK
-    }
-    */
 
     shm_zone = ngx_shared_memory_add(cf, &shm_name, shm_size, &ngx_http_upstream_health_check_module);
     if (shm_zone == NULL) {
@@ -657,8 +647,8 @@ ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confsp)
 
     for (i = 0; i < confsp->nelts; i++) {
         conf = &confs[i];
-        if (ngx_strncmp(conf->upstream_name->data
-                    , upstream_name->data, upstream_name->len) == 0) {
+        if (ngx_strncmp(conf->upstream_name->data, 
+                    upstream_name->data, upstream_name->len) == 0) {
             break;
         }
         conf = NULL;
@@ -825,7 +815,6 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
 
                 conf->type.send_handler = type->send_handler;
                 conf->type.recv_handler = type->recv_handler;
-                //ngx_memcpy(&conf->type, type, sizeof(ngx_peer_check_type));
             }
 
             continue;
@@ -882,7 +871,7 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
     }
 
     if (conf->type.name.len == 0) {
-        ngx_memcpy(&conf->type, ngx_peer_check_types, sizeof(ngx_peer_check_type));
+        ngx_memcpy(&conf->type, ngx_peer_check_types, sizeof(ngx_peer_check_type)); // default tcp
     }
 
     conf->interval = (conf->interval != NGX_CONF_UNSET_MSEC) 
@@ -890,7 +879,7 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
     conf->timeout = (conf->timeout != NGX_CONF_UNSET_MSEC) 
                         ? conf->timeout : 1000;
     conf->min_rise = (conf->min_rise != NGX_CONF_UNSET_UINT) 
-                        ? conf->min_rise : 1;
+                        ? conf->min_rise : 5;
     conf->max_fail = (conf->max_fail != NGX_CONF_UNSET_UINT) 
                         ? conf->max_fail : 2;
     
@@ -931,7 +920,6 @@ ngx_http_upstream_health_check_init_timers(ngx_cycle_t *cycle)
     ngx_http_upstream_main_conf_t              *umcf;
     ngx_core_conf_t                            *ccf;
     ngx_uint_t                                  i;
-    ngx_int_t                                   worker_processes;
     ngx_array_t                                *peersp;
     
     ucmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_health_check_module);
@@ -1399,8 +1387,10 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
 
     if (rc == 1) {
          peer->shm->rise += 1;
+         peer->shm->fail = 0;
     }  else {
          peer->shm->fail += 1;
+         peer->shm->rise = 0;
     } 
 
     ngx_log_debug4(NGX_LOG_DEBUG_HTTP, peer->log, 0, 
@@ -1712,13 +1702,10 @@ done:
 static ngx_int_t
 ngx_http_upstream_health_check_need_exit(ngx_event_t *ev)
 {
-    ngx_http_upstream_health_check_peer_t *peer;
-
-    peer = ev->data;
     if (ngx_terminate || ngx_quit || ngx_exiting) {
         ngx_log_error(NGX_LOG_ERR, ev->log, 0,
                 "[check] need exit: worker exist, pid=%P", ngx_pid);
-        ngx_http_upstream_health_check_clear(peer);
+        ngx_http_upstream_health_check_clear();
         return NGX_ERROR;
     }
 
@@ -1726,108 +1713,54 @@ ngx_http_upstream_health_check_need_exit(ngx_event_t *ev)
 }
 
 static void
-ngx_http_upstream_health_check_clear(ngx_http_upstream_health_check_peer_t *peer)
+ngx_http_upstream_health_check_clear()
 {
-    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, peer->log, 0, 
-            "[check] peer clear: name=%V, pid=%P", &peer->name, ngx_pid);
-
-    ngx_connection_t *c;
-    
-    c = peer->pc.connection;
-
-    if (peer->check_timeout_ev.timer_set) {
-        ngx_del_timer(&peer->check_timeout_ev);
-    }
-
-    if (peer->check_ev.timer_set) {
-        ngx_del_timer(&peer->check_ev);
-    }
- 
-    if (c != NULL) {
-        ngx_close_connection(c);
-        peer->pc.connection = NULL;
-    }
-
-    if (peer->pool != NULL) {
-        ngx_destroy_pool(peer->pool);
-        peer->pool = NULL;
-    }
-
-    ngx_memzero(peer, sizeof(ngx_http_upstream_health_check_peer_t));
-}
-
-/*
-static ngx_int_t
-ngx_http_upstream_add_dynamic_peer(ngx_http_upstream_rr_peer_t *rr_peer, ngx_http_upstream_health_check_conf_t *conf) {
-    ngx_slab_pool_t                       *shpool;
-    ngx_http_upstream_check_peer_shm_t    *peer_head;
-    ngx_array_t                           *confsp;
-    ngx_http_upstream_health_check_conf_t *confs, *conf;
-    ngx_http_upstream_health_check_peer_t *peer;
+    ngx_uint_t                             i;
+    ngx_connection_t                      *c;
+    ngx_http_upstream_health_check_peer_t *peers, *peer;
 
     if (check_main_conf == NULL) {
-        return NGX_ERROR;
+        return ;
     }
 
-    //init peer_t
+    peers = check_main_conf->peers.elts;
 
-    shpool = check_main_conf->shpool;
+    for (i = 0; i < check_main_conf->peers.nelts; i++) {
+        peer = &peers[i];
 
-    //alloc peer_shm
-    ngx_http_check_peer_lock();
+        ngx_http_check_peer_lock();
 
-    peer_head = check_main_conf->peers_shm->dynamic_peers;
+        if (peer->shm->wid != (ngx_process_slot % worker_processes)) {
+            ngx_http_check_peer_unlock();
+            continue;
+        }
 
-    peer_shm = ngx_slab_alloc_locked(shpool, sizeof(ngx_http_upstream_check_peer_shm_t));
-    if (peer_shm == NULL) {
-        goto add_fail;
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, peer->log, 0, 
+            "[check] peer clear: name=%V, pid=%P", &peer->name, ngx_pid);
+
+        if (peer->check_timeout_ev.timer_set) {
+            ngx_del_timer(&peer->check_timeout_ev);
+        }
+
+        if (peer->check_ev.timer_set) {
+            ngx_del_timer(&peer->check_ev);
+        }
+ 
+        c = peer->pc.connection;
+        if (c != NULL) {
+            ngx_close_connection(c);
+            peer->pc.connection = NULL;
+        }
+
+        if (peer->pool != NULL) {
+            ngx_destroy_pool(peer->pool);
+            peer->pool = NULL;
+        }
+
+        ngx_memzero(peer, sizeof(ngx_http_upstream_health_check_peer_t));
     }
 
-    peer_shm->index = peers_shm->total_peers + 1;
-    peer_shm->wid = -1;
-    peer_shm->rr_peer = rr_peer;
-
-    peer_shm->socklen = rr_peer->socklen;
-    peer_shm->sockaddr = ngx_slab_alloc_locked(shpool, peer_shm->socklen);
-    if (peer_shm->sockaddr == NULL) {
-        goto add_fail;
-    }
-    ngx_memcpy(peer_shm->sockaddr, rr_peer->sockaddr, rr_peer->socklen);
-
-    peer_shm->name = ngx_slab_alloc_locked(shpool, sizeof(ngx_str_t));
-    if (peer_shm->name == NULL) {
-        goto add_fail;
-    }
-    peer_shm->name->len = rr_peer->name.len;
-    peer_shm->name->data = ngx_slab_alloc_locked(shpool, peer_shm->name->len);
-    if (peer_shm->name->data == NULL) {
-        goto add_fail;
-    }
-    ngx_memcpy(peer_shm->name->data, rr_peer->name.data, rr_peer->name.len);
-
-    peer_shm->fail = 0;
-    peer_shm->rise = 0;
-
-    peer_shm->next = peer_head->next;
-    peer_shm->prev = peer_head;
-
-    peer_head->next = peer_shm;
-
-    peers_shm->total_peers += 1;
-
-    ngx_http_check_peer_unlock();
-
-    return NGX_OK;
-   
-add_fail:
-    ngx_http_check_peer_unlock();
-    return NGX_ERROR;
 }
-
-static void *
-ngx_http_upstream_remove_dynamic_peer(ngx_http_upstream_rr_peer_t *rr_peer) {
-}
-*/
 
 static ngx_peer_check_type *
 ngx_http_get_peer_check_type(ngx_str_t *str)
