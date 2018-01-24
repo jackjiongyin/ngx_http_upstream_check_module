@@ -824,10 +824,13 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
             str.len = value[i].len - 9;
             str.data = value[i].data + 9;
 
+            //interval = ngx_parse_time(&str, 0);
             interval = ngx_atoi(str.data, str.len);
-
             if (interval != (ngx_msec_t)NGX_ERROR && interval != 0) {
                 conf->interval = interval;
+            } else {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0, 
+                        "[check] add srv conf: invalid parameter in interval, set default");
             }
 
             continue;
@@ -841,6 +844,9 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
 
             if (timeout != (ngx_msec_t)NGX_ERROR && timeout != 0) {
                 conf->timeout = timeout;
+            } else {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0, 
+                        "[check] add srv conf: invalid parameter in timeout, set default");
             }
 
             continue;
@@ -853,6 +859,9 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
             rise = ngx_atoi(str.data, str.len);
             if (rise != (ngx_uint_t)NGX_ERROR && rise != 0) {
                 conf->min_rise = rise;
+            } else {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0, 
+                        "[check] add srv conf: invalid parameter in rise, set default");
             }
 
             continue;
@@ -865,12 +874,18 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
             fail = ngx_atoi(str.data, str.len);
             if (fail != (ngx_uint_t)NGX_ERROR && fail != 0) {
                 conf->max_fail = fail;
+            } else {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0, 
+                        "[check] add srv conf: invalid parameter in fail, set default");
             }
+
             continue;
         }
     }
 
     if (conf->type.name.len == 0) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0, 
+                    "[check] add srv conf: set default check type, tcp check");
         ngx_memcpy(&conf->type, ngx_peer_check_types, sizeof(ngx_peer_check_type)); // default tcp
     }
 
@@ -1427,8 +1442,8 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
 static ngx_int_t ngx_http_upstream_health_check_process_response(ngx_connection_t *c)
 {
     ngx_http_upstream_health_check_peer_t *peer;
-    ssize_t                                size;
-    ngx_buf_t                             *b;
+    ssize_t                                size, n;
+    ngx_buf_t                             *b, *nb;
     ngx_int_t                              rc;
 
     peer = c->data;
@@ -1443,7 +1458,30 @@ static ngx_int_t ngx_http_upstream_health_check_process_response(ngx_connection_
     b = peer->recv_data;
 
     while(1) {
-        size = c->recv(c, b->last, b->end - b->last);
+        n = b->end - b->last;
+
+        //enlarge size
+        if (n == 0) {
+            n = b->end - b->start;
+
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, peer->log, 0,
+                    "[check] process res: enlarge size %d", n * 2);
+            nb = ngx_create_temp_buf(peer->pool, n * 2);
+            if (nb == NULL) {
+                 ngx_log_error(NGX_LOG_ERR, peer->log, 0, 
+                         "[check] process res: enlarge size fail %d", n * 2);
+                 ngx_pfree(peer->pool, b->start);
+                 b->start = NULL;
+            }
+            ngx_memcpy(nb, nb->start, n);
+            nb->last += n;
+            ngx_pfree(peer->pool, peer->recv_data->start);
+            peer->recv_data = b = nb;
+
+            n = b->end - b->last;
+        }
+
+        size = c->recv(c, b->last, n);
 
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, peer->log, 0,
                 "[check] recv res: size=%z, err=%d", size, ngx_socket_errno);
