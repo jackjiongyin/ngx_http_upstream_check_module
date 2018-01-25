@@ -327,9 +327,6 @@ ngx_http_upstream_health_check_create_main_conf(ngx_conf_t *cf)
     }
 #endif
 
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                "[check] create main conf: success");
-
     check_main_conf = conf;
 
     return conf;
@@ -382,9 +379,6 @@ ngx_http_upstream_health_check_init_main_conf(ngx_conf_t *cf, void *conf)
     shm_zone->noreuse = 1;
 
     ucmcf->shm_zone = shm_zone;
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] init main conf: init success");
 
     return NGX_CONF_OK;
 }
@@ -453,23 +447,14 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                     return NGX_ERROR;
                 }
 
-                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                        "[check] init peer: peer succ upstream_name=%V, name=%V", 
-                        peer->conf->upstream_name, &peer->name);
-
             }
 
         }
 
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                        "[check] init peer: srv succ upstream_name=%V", &uscf->host);
         return NGX_OK;
 
     } 
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                        "[check] init peer: no srv upstream_name=%V", &uscf->host);
- 
     return NGX_OK;
 }
 
@@ -625,9 +610,6 @@ ngx_http_upstream_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
     
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] health check conf: succ");
-
     return NGX_CONF_OK;
 }
 
@@ -654,9 +636,6 @@ ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confsp)
         conf = NULL;
     }
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] get conf: upstream=%V", upstream_name);
-
     if (conf == NULL) {
         conf = ngx_array_push(confsp);
         if (conf == NULL) {
@@ -671,9 +650,6 @@ ngx_http_check_get_conf(ngx_conf_t *cf, ngx_array_t *confsp)
         conf->min_rise = NGX_CONF_UNSET_UINT;
 
         ngx_memzero(&conf->type, sizeof(ngx_peer_check_type));
-
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                "[check] get conf: init conf succ, %V", upstream_name);
     }
 
     return conf;
@@ -704,16 +680,11 @@ ngx_http_check_set_http_send(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     value = cf->args->elts;
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] set http_send conf: http_send args num %i", cf->args->nelts);
- 
     if (value[1].data == NULL && value[1].len == 0) {
         return NGX_CONF_ERROR;
     }
 
     check_conf->type.http_send = value[1];
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0, "[check] set http_send conf: succ");
 
     return NGX_CONF_OK;
 }
@@ -746,9 +717,6 @@ ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t *cmd, void *c
 
     value = cf->args->elts;
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] set alive_http_status conf: http_send args num %i", cf->args->nelts);
-
     for (i = 1; i < cf->args->nelts; i++) {
         for (j = 0; mask[j].name.len != 0; j++) {
 
@@ -775,8 +743,6 @@ ngx_http_check_set_alive_http_status(ngx_conf_t *cf, ngx_command_t *cmd, void *c
 
     check_conf->type.alive_http_status = status;
 
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0, "[check] set alive_http_status conf: succ");
-
     return NGX_CONF_OK;
 }
 
@@ -795,9 +761,6 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
 
     value = cf->args->elts;
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] add srv conf: health check args num %i", cf->args->nelts);
-    
     for (i = 1; i < cf->args->nelts; i++) {
 
         if (ngx_strncmp(value[i].data, "type=", 5) == 0) {
@@ -898,14 +861,6 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
     conf->max_fail = (conf->max_fail != NGX_CONF_UNSET_UINT) 
                         ? conf->max_fail : 2;
     
-    ngx_log_debug6(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] add srv conf: type=%V, interval=%M, timeout=%M, rise=%i, fail=%i, status=%i",
-            &conf->type.name, conf->interval, conf->timeout, 
-            conf->min_rise, conf->max_fail, conf->type.alive_http_status);
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-            "[check] add srv conf: add srv conf succ");
- 
     return NGX_OK;
 
 }
