@@ -1751,6 +1751,7 @@ ngx_http_upstream_health_check_clear()
         }
 
         ngx_memzero(peer, sizeof(ngx_http_upstream_health_check_peer_t));
+        ngx_http_check_peer_unlock();
     }
 
 }
