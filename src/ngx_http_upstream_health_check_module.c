@@ -500,7 +500,7 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
         return NGX_OK;
     }
 
-    ngx_log_debug1(NGX_LOG_ERR, ngx_cycle->log, 0, 
+    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, 
             "[check] qa_shm : begin copy peer to shm, num=%i", peersp->nelts);
 
     peers = peersp->elts;
@@ -552,12 +552,12 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
 
         peer->shm = peer_shm;
 
-        ngx_log_debug2(NGX_LOG_ERR, ngx_cycle->log, 0, 
+        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, 
                 "[check] qa_shm : peer shm, name=%V, index=%i", peer_shm->name, peer_shm->index);
         j++;
     }
     
-    ngx_log_debug1(NGX_LOG_ERR, ngx_cycle->log, 0, 
+    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, 
             "[check] qa_shm : end copy peer to shm, num=%i", j);
 
     ucmcf->peers_shm = peers_shm;
@@ -589,7 +589,7 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
         return NGX_ERROR;
     }
 
-    ngx_log_debug0(NGX_LOG_ERR, ngx_cycle->log, 0, "[check] qa_shm : end");
+    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "[check] qa_shm : end");
 
     return NGX_OK;
 }
