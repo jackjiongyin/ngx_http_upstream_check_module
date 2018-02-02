@@ -1769,7 +1769,7 @@ ngx_http_upstream_health_check_clear()
 
         ngx_log_debug5(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0, 
             "[check] qa_shm peer clear: name=%V, pid=%P, wid=%i, slot=%i, wp=%i",
-            &peer->shm->name, ngx_pid, peer->shm->wid, ngx_process_slot, worker_processes);
+            peer->shm->name, ngx_pid, peer->shm->wid, ngx_process_slot, worker_processes);
         
         if (peer->pc.connection != NULL) {
             ngx_close_connection(peer->pc.connection);
