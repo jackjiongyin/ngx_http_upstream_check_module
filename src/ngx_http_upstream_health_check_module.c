@@ -430,6 +430,9 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                     return NGX_ERROR;
                 }
 
+                ngx_memzero(peer, sizeof(ngx_http_upstream_health_check_peer_t));
+                ngx_memzero(&peer->status, sizeof(ngx_http_status_t));
+
                 peer->state = 0;
                 peer->check_state = NGX_CHECK;
 
@@ -438,15 +441,6 @@ ngx_http_upstream_health_check_init_peers(ngx_conf_t *cf, ngx_http_upstream_srv_
                 peer->socklen = server[i].addrs[j].socklen;
 
                 peer->conf = conf;
-                ngx_memzero(&peer->status, sizeof(ngx_http_status_t));
-
-                peer->pool = ngx_create_pool(ngx_pagesize, cf->log);
-                if (peer->pool == NULL) {
-                    ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
-                            "[check] init peer: alloc peer pool fail, %V", &peer->name);
-                    return NGX_ERROR;
-                }
-
             }
 
         }
@@ -787,7 +781,6 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
             str.len = value[i].len - 9;
             str.data = value[i].data + 9;
 
-            //interval = ngx_parse_time(&str, 0);
             interval = ngx_atoi(str.data, str.len);
             if (interval != (ngx_msec_t)NGX_ERROR && interval != 0) {
                 conf->interval = interval;
@@ -844,6 +837,8 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
 
             continue;
         }
+
+        goto invalid;
     }
 
     if (conf->type.name.len == 0) {
@@ -863,6 +858,10 @@ ngx_http_upstream_health_check_init_conf(ngx_conf_t *cf,  ngx_http_upstream_heal
     
     return NGX_OK;
 
+invalid:
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "invalid parameter \"%V\"", &value[i]);
+    return NGX_ERROR;
 }
 
 static ngx_int_t
@@ -984,6 +983,16 @@ ngx_http_upstream_health_check_add_timers(ngx_http_upstream_health_check_peer_t 
     peer->check_timeout_ev.log = log;
     peer->check_timeout_ev.timer_set = 0;
 
+    ngx_memzero(&peer->pc, sizeof(ngx_peer_connection_t));
+
+    peer->pool = ngx_create_pool(ngx_pagesize, log);
+
+    if (peer->pool == NULL) {
+        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
+                "[check] init peer: alloc peer pool fail, %V", &peer->name);
+        return NGX_ERROR;
+    }
+
     ngx_add_timer(&peer->check_ev, interval);
 
     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, log, 0,
@@ -1034,14 +1043,6 @@ ngx_http_upstream_health_check_connect_handler(ngx_event_t *ev)
 
     pc = &peer->pc;
 
-    pc->log = log;
-    pc->log_error =  NGX_ERROR_ERR;
-    pc->start_time = ngx_current_msec;
-    pc->get = ngx_event_get_peer;
-    pc->sockaddr = peer->sockaddr;
-    pc->socklen = peer->socklen;
-    pc->name =  &peer->name;
-
     if (pc->connection != NULL) {
         if (ngx_http_upstream_health_check_connect_alive(pc->connection) != NGX_OK){
             ngx_http_upstream_health_check_finish_handler(peer, 0);
@@ -1049,6 +1050,15 @@ ngx_http_upstream_health_check_connect_handler(ngx_event_t *ev)
             goto connect_done;
         }
     }
+
+    pc->log = log;
+    pc->log_error =  NGX_ERROR_ERR;
+    pc->start_time = ngx_current_msec;
+    pc->get = ngx_event_get_peer;
+    pc->sockaddr = peer->sockaddr;
+    pc->socklen = peer->socklen;
+    pc->name =  &peer->name;
+    pc->cached = 0;
 
     rc = ngx_event_connect_peer(pc);
 
@@ -1058,7 +1068,6 @@ ngx_http_upstream_health_check_connect_handler(ngx_event_t *ev)
         return ;
     }
 
-    /* rc == NGX_OK || rc == NGX_AGAIN */
     c = pc->connection;
 
     c->data = peer;
@@ -1071,7 +1080,8 @@ ngx_http_upstream_health_check_connect_handler(ngx_event_t *ev)
     c->write->data = peer;
     c->read->handler = peer->conf->type.recv_handler;
     c->read->data = peer;
-
+    c->sendfile = 0;
+    
 connect_done:
     peer->check_state = NGX_CHECK_CONNECT_DONE;
     ngx_add_timer(&peer->check_timeout_ev, peer->conf->timeout);
@@ -1699,22 +1709,25 @@ ngx_http_upstream_health_check_need_exit(ngx_event_t *ev)
         ngx_log_error(NGX_LOG_ERR, ev->log, 0,
                 "[check] need exit: worker exist, pid=%P", ngx_pid);
         ngx_http_upstream_health_check_clear();
-        return NGX_ERROR;
+        return 1;
     }
 
-    return NGX_OK;
+    return 0;
 }
 
 static void
 ngx_http_upstream_health_check_clear()
 {
     ngx_uint_t                             i;
-    ngx_connection_t                      *c;
     ngx_http_upstream_health_check_peer_t *peers, *peer;
+    static ngx_flag_t                has_cleared = 0;
 
-    if (check_main_conf == NULL) {
+
+    if (has_cleared || check_main_conf == NULL) {
         return ;
     }
+
+    has_cleared = 1;
 
     peers = check_main_conf->peers.elts;
 
@@ -1728,9 +1741,6 @@ ngx_http_upstream_health_check_clear()
             continue;
         }
 
-        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, peer->log, 0, 
-            "[check] peer clear: name=%V, pid=%P", &peer->name, ngx_pid);
-
         if (peer->check_timeout_ev.timer_set) {
             ngx_del_timer(&peer->check_timeout_ev);
         }
@@ -1738,14 +1748,27 @@ ngx_http_upstream_health_check_clear()
         if (peer->check_ev.timer_set) {
             ngx_del_timer(&peer->check_ev);
         }
- 
-        c = peer->pc.connection;
-        if (c != NULL) {
-            ngx_close_connection(c);
+
+        ngx_log_debug5(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0, 
+            "[check] peer clear: name=%V, pid=%P, wid=%i, slot=%i, wp=%i",
+            &peer->name, ngx_pid, peer->shm->wid, ngx_process_slot, worker_processes);
+        
+        if (peer->pc.connection != NULL) {
+            ngx_close_connection(peer->pc.connection);
             peer->pc.connection = NULL;
         }
 
         if (peer->pool != NULL) {
+            if (peer->send_data != NULL) {
+                ngx_pfree(peer->pool, peer->send_data);
+                peer->send_data = NULL;
+            }
+
+            if (peer->recv_data != NULL) {
+                ngx_pfree(peer->pool, peer->recv_data);
+                peer->recv_data = NULL;
+            }
+
             ngx_destroy_pool(peer->pool);
             peer->pool = NULL;
         }
