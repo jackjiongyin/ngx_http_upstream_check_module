@@ -553,7 +553,7 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
         peer->shm = peer_shm;
 
         ngx_log_debug2(NGX_LOG_ERR, ngx_cycle->log, 0, 
-                "[check] qa_shm : peer shm, name=%V, index=%i", &peer_shm->name, peer_shm->index);
+                "[check] qa_shm : peer shm, name=%V, index=%i", peer_shm->name, peer_shm->index);
         j++;
     }
     
