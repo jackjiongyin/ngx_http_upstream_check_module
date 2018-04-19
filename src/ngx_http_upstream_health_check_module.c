@@ -1,13 +1,13 @@
 /***************************************************************************
  * 
- * Copyright (c) 2017 Baidu.com, Inc. All Rights Reserved
+ * Copyright (c) 2017 Jiongjie Yin. All Rights Reserved
  * $Id$ 
  * 
  **************************************************************************/
  
  /**
  * @file ngx_http_upstream_health_check_module.c
- * @author jiong(jiong@baidu.com)
+ * @author jiong(jackjiongyin@gmail.com)
  * @date 2017/12/07 12:35:29
  * @version $Revision$ 
  * @brief 
@@ -35,14 +35,12 @@
 #define ngx_http_check_peer_lock()                         \
                                                            \
     if (check_main_conf->shpool) {                         \
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0, "[check] qa_shm : %P lock", ngx_pid); \
         ngx_shmtx_lock(&check_main_conf->shpool->mutex);   \
     }                                         
 
 #define ngx_http_check_peer_unlock()                       \
                                                            \
     if (check_main_conf->shpool) {                         \
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0, "[check] qa_shm : %P unlock", ngx_pid); \
         ngx_shmtx_unlock(&check_main_conf->shpool->mutex); \
     }                                         
 
@@ -467,8 +465,6 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
     ngx_slab_pool_t                            *shpool;
     ngx_uint_t                                  i, j;
 
-    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "[check] qa_shm : begin");
-
     shpool = (ngx_slab_pool_t *)shm_zone->shm.addr;
 
     ucmcf = shm_zone->data;
@@ -499,9 +495,6 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
     if (peersp->nelts == 0) {
         return NGX_OK;
     }
-
-    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, 
-            "[check] qa_shm : begin copy peer to shm, num=%i", peersp->nelts);
 
     peers = peersp->elts;
     j = 0;
@@ -552,14 +545,9 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
 
         peer->shm = peer_shm;
 
-        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, 
-                "[check] qa_shm : peer shm, name=%V, index=%i", peer_shm->name, peer_shm->index);
         j++;
     }
     
-    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, 
-            "[check] qa_shm : end copy peer to shm, num=%i", j);
-
     ucmcf->peers_shm = peers_shm;
     shpool->data = peers_shm;
     shm_zone->data = peers_shm;
@@ -588,8 +576,6 @@ ngx_http_upstream_health_check_init_shm(ngx_shm_zone_t *shm_zone, void *data)
     if (ngx_shmtx_create(&shpool->mutex, &shpool->lock, file) != NGX_OK) {
         return NGX_ERROR;
     }
-
-    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "[check] qa_shm : end");
 
     return NGX_OK;
 }
@@ -947,11 +933,6 @@ ngx_http_upstream_health_check_init_timers(ngx_cycle_t *cycle)
             ngx_http_check_peer_unlock();
             continue;
         }
-
-        ngx_log_debug6(NGX_LOG_DEBUG_HTTP, cycle->log, 0, 
-                "[check] qa_shm init timers: peer=%V, rr_peer=%V, pid=%P, slot=%i, wid=%i, wp=%i", 
-                &peer->name, &peer->shm->rr_peer->name, ngx_pid, 
-                ngx_process_slot, peer->shm->wid, worker_processes);
 
         ngx_http_check_peer_unlock();
 
@@ -1391,10 +1372,6 @@ static void ngx_http_upstream_health_check_update_status(ngx_http_upstream_healt
          peer->shm->rise = 0;
     } 
 
-    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, peer->log, 0, 
-            "[check] qa_shm update status : name=%V, rise=%z, fail=%z, pid=%P"
-            , &peer->name, peer->shm->rise, peer->shm->fail, ngx_pid);
-      
     rr_peer = peer->shm->rr_peer;
 
     if (peer->shm->rise == conf->min_rise) {
@@ -1767,10 +1744,6 @@ ngx_http_upstream_health_check_clear()
             ngx_del_timer(&peer->check_ev);
         }
 
-        ngx_log_debug5(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0, 
-            "[check] qa_shm peer clear: name=%V, pid=%P, wid=%i, slot=%i, wp=%i",
-            peer->shm->name, ngx_pid, peer->shm->wid, ngx_process_slot, worker_processes);
-        
         if (peer->pc.connection != NULL) {
             ngx_close_connection(peer->pc.connection);
             peer->pc.connection = NULL;
